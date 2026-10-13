@@ -1,0 +1,62 @@
+name: Validate blank skill metadata
+
+on:
+  push:
+    branches: [codex/validate-blank-skill-metadata]
+
+permissions:
+  contents: read
+
+jobs:
+  baseline-and-fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CI: 'true'
+      DISABLE_TELEMETRY: '1'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Unchanged baseline suite
+        shell: bash
+        run: |
+          git show 13e4063a1cf913f5606d57d42ab83a86f5001e04:src/skills.ts > src/skills.ts
+          git show 13e4063a1cf913f5606d57d42ab83a86f5001e04:tests/skill-matching.test.ts > tests/skill-matching.test.ts
+          pnpm exec vitest run
+      - name: Confirm all six regressions fail before the fix
+        shell: bash
+        run: |
+          git restore -- tests/skill-matching.test.ts
+          if pnpm exec vitest run tests/skill-matching.test.ts --reporter=default --reporter=json --outputFile.json=regression-before.json; then
+            echo 'Regression cases unexpectedly passed on the baseline'
+            exit 1
+          fi
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          const result = JSON.parse(readFileSync('regression-before.json', 'utf8'));
+          assert.equal(result.numFailedTests, 6);
+          assert.equal(result.numPassedTests, 26);
+          const failed = result.testResults.flatMap(test => test.assertionResults)
+            .filter(test => test.status === 'failed');
+          assert.equal(failed.filter(test => test.title.endsWith('after normalization')).length, 5);
+          assert.equal(failed.filter(test => test.title.startsWith('skips blank metadata')).length, 1);
+          console.log('Confirmed six expected failures and 26 unchanged passing controls');
+          JS
+      - name: Restore and check the exact fixed source
+        shell: bash
+        run: |
+          git restore -- src/skills.ts
+          git diff --exit-code 7b7f34e9a38a07947fdf1862838ccd0a58b19811 -- src tests scripts package.json pnpm-lock.yaml
+          pnpm type-check
+          pnpm format:check
+          pnpm exec prettier --check tests/skill-matching.test.ts
+      - name: Build and run the full fixed suite
+        run: |
+          pnpm build
+          pnpm exec vitest run
